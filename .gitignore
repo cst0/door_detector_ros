@@ -266,3 +266,7 @@ COLCON_IGNORE
 AMENT_IGNORE
 
 # End of https://www.toptal.com/developers/gitignore/api/ros,ros2,python,c++
+
+# don't want to push these weights onto git
+src/yolo-door.cfg
+src/yolo-door.weights

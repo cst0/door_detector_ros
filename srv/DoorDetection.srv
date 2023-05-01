@@ -1,4 +1,0 @@
----
-sensor_msgs/CameraInfo source_image_info
-geometry_msgs/Pose2D handle
-geometry_msgs/Pose2D hinge

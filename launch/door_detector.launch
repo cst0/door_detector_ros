@@ -1,0 +1,4 @@
+<!-- launch file for the door detector node -->
+<launch>
+  <node name="door_detector" pkg="door_detector_ros" type="door_detection.py" ns="/spot"/>
+</launch>

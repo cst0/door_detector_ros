@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
+import traceback
 
 import cv2
-import numpy as np
 import cv_bridge
-import rospy
+import numpy as np
 import rospkg
-
+import rospy
 from sensor_msgs.msg import Image
-from vision_msgs.msg import Detection2D, ObjectHypothesisWithPose
-from spot_msgs.srv import DoorOpen, DoorOpenResponse, DoorOpenRequest
+from spot_msgs.srv import DoorOpen, DoorOpenRequest, DoorOpenResponse
 from std_srvs.srv import Trigger, TriggerRequest, TriggerResponse
+from vision_msgs.msg import Detection2D, ObjectHypothesisWithPose
 
 """
 Door detector class. Creates a ros Image subscriber with a callback
@@ -30,21 +31,19 @@ class DoorDetector:
     def __init__(self, args):
         self.bridge = cv_bridge.CvBridge()
         self.image_sub = rospy.Subscriber(
-            "/camera/color/image_raw", Image, self.image_callback, queue_size=1
+            "camera/hand_color/image", Image, self.image_callback, queue_size=1
         )
-        self.image_pub = rospy.Publisher(
-            "/camera/color/detections", Image, queue_size=1
-        )
+        self.image_pub = rospy.Publisher("camera/color/detections", Image, queue_size=1)
         self.depth_pub = rospy.Subscriber(
-            "/camera/depth/image_rect_raw", Image, self.depth_callback, queue_size=1
+            "depth/hand/depth_in_color", Image, self.depth_callback, queue_size=1
         )
         self.detections_pub = rospy.Publisher(
-            "/camera/detections", Detection2D, queue_size=1
+            "camera/detections", Detection2D, queue_size=1
         )
         self.open_door_srv = rospy.Service(
-            "/run_open_door", Trigger, self.handle_open_door_callback
+            "run_open_door", Trigger, self.handle_open_door_callback
         )
-        self.open_door_client = rospy.ServiceProxy("/open_door", DoorOpen)
+        self.open_door_client = rospy.ServiceProxy("open_door", DoorOpen)
 
         self.rotate_left = args.rotate_left
         self.rotate_right = args.rotate_right
@@ -54,20 +53,40 @@ class DoorDetector:
         # door_detection package on the robot
         package_path = self.get_package_path()
         # the weights and config files are stored in the cfg folder
-        weights_path = package_path + "/cfg/yolov3-door.weights"
-        config_path = package_path + "/cfg/yolov3-door.cfg"
+        weights_path = package_path + "/cfg/yolo-door.weights"
+        config_path = package_path + "/cfg/yolo-door.cfg"
 
-        self.net = cv2.dnn.readNet(
-            weights_path,
-            config_path,
-        )
+        try:
+            self.net = cv2.dnn.readNet(
+                weights_path,
+                config_path,
+            )
+        except cv2.error as e:
+            rospy.logerr("Failed to load weights/config: {}".format(e))
+            rospy.logerr(
+                "We looked for:\n{}\nand \n{}".format(weights_path, config_path)
+            )
+            # check that the files exist
+            weight_filepath_exists = os.path.exists(weights_path)
+            config_filepath_exists = os.path.exists(config_path)
+            rospy.logerr(
+                "The files exist:\n{}\n{}".format(
+                    weight_filepath_exists, config_filepath_exists
+                )
+            )
+
+            exit(1)
 
         self.raw_image = None
+        self.cvt_image = None
         self.depth_image = None
         self.detections = []
         self.detections_time = []
         self.tracking_length_seconds = 2
+
         self.timer_loop = rospy.Timer(rospy.Duration(0.5), self.timer_callback)
+
+        rospy.loginfo("Door detector initialized")
 
     def handle_open_door_callback(self, _):
         # we got a trigger here, so we're gonna figure out how to open the door
@@ -80,7 +99,11 @@ class DoorDetector:
             try:
                 req = self.populate_door_open_req(req)
             except Exception as e:
-                rospy.logerr("Failed to populate door open request: {}".format(e))
+                rospy.logerr(
+                    "Failed to populate door open request: {}.\nTraceback:\n{}".format(
+                        e, str(traceback.format_exc())
+                    )
+                )
 
         if req is None:
             return TriggerResponse(success=False, message="Couldn't open door")
@@ -88,14 +111,14 @@ class DoorDetector:
         resp = self.open_door_client(req)
         return TriggerResponse(success=resp.success, message=resp.message)
 
-    def populate_door_open_req(self, req):
+    def populate_door_open_req(self, req:DoorOpenRequest):
         most_recent_detection: Detection2D = self.detections[-1]
         handle_position = None
         hinge_position = None
 
         assert most_recent_detection.results is not None, "No results in detection"
         assert self.raw_depth is not None, "No depth image"
-        assert self.raw_image is not None, "No image"
+        assert self.cvt_image is not None, "No image"
 
         for result in most_recent_detection.results:
             if result.id in HANDLE_IDS:
@@ -106,20 +129,28 @@ class DoorDetector:
             if result.id in DOOR_IDS:
                 hinge_position = handle_position
                 hinge_position.x = (
-                    self.raw_image.shape[1] - handle_position.x
+                    self.cvt_image.shape[1] - handle_position.x
                 )  # just drop it on the other side
 
         assert handle_position is not None, "No handle position found"
         assert hinge_position is not None, "No hinge position found"
 
         req.hinge_side = (
-            req.HINGE_LEFT if hinge_position.x < handle_position.x else req.HINGE_RIGHT
+            req.HINGE_SIDE_LEFT if hinge_position.x < handle_position.x else req.HINGE_SIDE_RIGHT
         )
         # create a raycast of the handle position given the known x and y of the handle
-        handle_x = handle_position.x
-        handle_y = handle_position.y
+        handle_x = int(handle_position.x)
+        handle_y = int(handle_position.y)
         # get the depth at the handle position
-        handle_depth = self.raw_depth[handle_y, handle_x]
+        try:
+            handle_depth = self.raw_depth[handle_y, handle_x]
+        except Exception as e:
+            rospy.logerr(
+                "Handle position invalid: x: {}, y: {}".format(
+                    handle_x, handle_y
+                )
+            )
+            raise e
 
         # now that we have x, y, and depth, we can convert it to a normalized vector
         handle_vector = np.array([handle_x, handle_y, handle_depth])
@@ -141,7 +172,6 @@ class DoorDetector:
             return
 
         image = self.bridge.imgmsg_to_cv2(self.raw_image, "bgr8")
-        self.raw_image = None
 
         # rotate image left
         if self.rotate_left:
@@ -159,8 +189,10 @@ class DoorDetector:
         blob = cv2.dnn.blobFromImage(
             image, scale, (416, 416), (0, 0, 0), True, crop=False
         )
+        self.cvt_image = image
+
         self.net.setInput(blob)
-        outs = self.net.forward(self.get_output_layers(net))
+        outs = self.net.forward(self.get_output_layers(self.net))
 
         class_ids = []
         confidences = []
@@ -205,15 +237,23 @@ class DoorDetector:
         detections = self.get_detections(class_ids, confidences, boxes)
         self.detections_pub.publish(detections)
 
+        rospy.loginfo_throttle_identical(2, "Detections: {}".format(detections))
+
         # prune old detections
+        # I don't love the way I'm doing this tbh
         self.detections.append(detections)
         self.detections_time.append(rospy.Time.now())
+        new_detection_list = []
+        new_time_list = []
         for i in range(len(self.detections_time)):
-            if rospy.Time.now() - self.detections_time[i] > rospy.Duration(
+            if rospy.Time.now() - self.detections_time[i] < rospy.Duration(
                 self.tracking_length_seconds
             ):
-                self.detections.pop(0)
-                self.detections_time.pop(0)
+                new_detection_list.append(self.detections[i])
+                new_time_list.append(self.detections_time[i])
+
+        self.detections = new_detection_list
+        self.detections_time = new_time_list
 
     def get_output_layers(self, net):
         layer_names = net.getLayerNames()

@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+
+from door_detector_ros.src.door_detection import DoorDetector
+import argparse
+import rospy
+
+def main():
+    # argument parsing: create argparse parser, parse for rotation-indicator flag
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rotate_left", "-l", action="store_true")
+    parser.add_argument("--rotate_right", "-r", action="store_true")
+    parser.add_argument("--rotate_down", "-d", action="store_true")
+
+    args = parser.parse_args(rospy.myargv()[1:])
+
+    rospy.init_node("door_detector", anonymous=True)
+    DoorDetector(args)
+    rospy.spin()
+
+if __name__ == "__main__":
+    main()

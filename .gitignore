@@ -270,3 +270,4 @@ AMENT_IGNORE
 # don't want to push these weights onto git
 src/yolo-door.cfg
 src/yolo-door.weights
+cfg/yolo-door.weights
